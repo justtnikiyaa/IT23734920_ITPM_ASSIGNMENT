@@ -77,13 +77,17 @@ def _resolve_path(p: str | None) -> str | None:
     path = Path(p)
     if path.is_absolute():
         return str(path)
+    # Check current working directory first
+    cwd_candidate = (Path.cwd() / path).resolve()
+    if cwd_candidate.exists():
+        return str(cwd_candidate)
     root_candidate = (ROOT_DIR / path).resolve()
     if root_candidate.exists():
         return str(root_candidate)
     tests_candidate = (TESTS_DIR / path).resolve()
     if tests_candidate.exists():
         return str(tests_candidate)
-    return str(root_candidate)
+    return str(cwd_candidate)
 
 def _normalize_header(value) -> str:
     if value is None:
@@ -262,11 +266,24 @@ def _clear_textarea(page, locator, attempts: int = 3):
 
 def _ensure_input_value(page, input_locator, text: str, type_delay_ms: int):
     _clear_textarea(page, input_locator)
-    if type_delay_ms and int(type_delay_ms) > 0:
-        input_locator.click(timeout=2000)
-        input_locator.type(text, delay=int(type_delay_ms))
-    else:
+    try:
+        if type_delay_ms and int(type_delay_ms) > 0:
+            input_locator.click(timeout=2000)
+            try:
+                input_locator.type(text, delay=int(type_delay_ms), timeout=30000)
+            except Exception as e:
+                # If typing fails, fall back to fill
+                page.wait_for_timeout(200)
+                _clear_textarea(page, input_locator)
+                input_locator.fill(text)
+        else:
+            input_locator.fill(text)
+    except Exception:
+        # Last resort: try fill method
+        page.wait_for_timeout(200)
+        _clear_textarea(page, input_locator)
         input_locator.fill(text)
+    
     try:
         current = input_locator.input_value()
         if current is None:
@@ -469,75 +486,82 @@ def run_test():
 
         # 4. Iterate Rows
         processed = 0
-        for row_index in range(header_row + 1, int(ws.max_row or 0) + 1):
-            if not _is_top_left_of_merged_cell(ws, row_index, input_col_idx):
-                continue
+        try:
+            for row_index in range(header_row + 1, int(ws.max_row or 0) + 1):
+                if not _is_top_left_of_merged_cell(ws, row_index, input_col_idx):
+                    continue
 
-            input_cell = _merged_top_left_cell(ws, row_index, input_col_idx)
-            input_value = input_cell.value
-            singlish_input = str(input_value).strip() if input_value is not None else ""
-            if not singlish_input:
-                continue
+                input_cell = _merged_top_left_cell(ws, row_index, input_col_idx)
+                input_value = input_cell.value
+                singlish_input = str(input_value).strip() if input_value is not None else ""
+                if not singlish_input:
+                    continue
 
-            expected_value = (
-                _merged_top_left_cell(ws, row_index, expected_col_idx).value if expected_col_idx else None
-            )
-            expected_sinhala = str(expected_value).strip() if expected_value is not None else ""
+                expected_value = (
+                    _merged_top_left_cell(ws, row_index, expected_col_idx).value if expected_col_idx else None
+                )
+                expected_sinhala = str(expected_value).strip() if expected_value is not None else ""
 
-            print(f"Testing [Row {row_index}]: {singlish_input}")
+                print(f"Testing [Row {row_index}]: {singlish_input}")
 
-            try:
-                _dismiss_overlays(page)
-                prev_output = _read_output(is_chat, output_locator)
-                _ensure_input_value(page, input_locator, singlish_input, int(args.type_delay_ms))
-
-                if action_locator:
-                    action_locator.click()
-
-                page.wait_for_timeout(max(0, int(args.wait_ms)))
-                
-                # Wait for visible content - retry a few times if empty
-                actual_output = ""
-                tries = max(1, int(args.retries))
-                for i in range(tries):
-                    current = _read_output(is_chat, output_locator)
-                    if not current:
-                        page.wait_for_timeout(max(0, int(args.retry_wait_ms)))
-                        continue
-                    if prev_output and current == prev_output:
-                        page.wait_for_timeout(max(0, int(args.retry_wait_ms)))
-                        continue
-                    if current:
-                        actual_output = current
-                        break
-                    page.wait_for_timeout(max(0, int(args.retry_wait_ms)))
-
-                if prev_output and actual_output == "" and prev_output != "":
-                    raise RuntimeError("Output did not update for this input (still showing previous output).")
-
-                _set_cell_value(ws, row_index, actual_col_idx, actual_output)
-
-                if expected_sinhala:
-                    status = "PASS" if actual_output == expected_sinhala else "FAIL"
-                else:
-                    status = "COLLECTED"
-                _set_cell_value(ws, row_index, status_col_idx, status)
-                print(f"  -> {status}")
-                processed += 1
-                if args.save_every and int(args.save_every) > 0 and processed % int(args.save_every) == 0:
-                    wb.save(args.output)
-                
-            except Exception as e:
-                print(f"Error in UI interaction: {e}")
                 try:
-                    _set_cell_value(ws, row_index, status_col_idx, "UI Error")
-                except Exception:
-                    pass
-                if args.save_every and int(args.save_every) > 0:
-                    try:
+                    _dismiss_overlays(page)
+                    prev_output = _read_output(is_chat, output_locator)
+                    _ensure_input_value(page, input_locator, singlish_input, int(args.type_delay_ms))
+
+                    if action_locator:
+                        action_locator.click()
+
+                    page.wait_for_timeout(max(0, int(args.wait_ms)))
+                    
+                    # Wait for visible content - retry a few times if empty
+                    actual_output = ""
+                    tries = max(1, int(args.retries))
+                    for i in range(tries):
+                        current = _read_output(is_chat, output_locator)
+                        if not current:
+                            page.wait_for_timeout(max(0, int(args.retry_wait_ms)))
+                            continue
+                        if prev_output and current == prev_output:
+                            page.wait_for_timeout(max(0, int(args.retry_wait_ms)))
+                            continue
+                        if current:
+                            actual_output = current
+                            break
+                        page.wait_for_timeout(max(0, int(args.retry_wait_ms)))
+
+                    if prev_output and actual_output == "" and prev_output != "":
+                        raise RuntimeError("Output did not update for this input (still showing previous output).")
+
+                    _set_cell_value(ws, row_index, actual_col_idx, actual_output)
+
+                    if expected_sinhala:
+                        status = "PASS" if actual_output == expected_sinhala else "FAIL"
+                    else:
+                        status = "COLLECTED"
+                    _set_cell_value(ws, row_index, status_col_idx, status)
+                    print(f"  -> {status}")
+                    processed += 1
+                    if args.save_every and int(args.save_every) > 0 and processed % int(args.save_every) == 0:
                         wb.save(args.output)
+                    
+                except Exception as e:
+                    print(f"Error in UI interaction: {e}")
+                    try:
+                        _set_cell_value(ws, row_index, status_col_idx, "UI Error")
                     except Exception:
                         pass
+                    if args.save_every and int(args.save_every) > 0:
+                        try:
+                            wb.save(args.output)
+                        except Exception:
+                            pass
+        except KeyboardInterrupt:
+            print("\nTest interrupted by user.")
+            try:
+                wb.save(args.output)
+            except Exception:
+                pass
 
         if args.keep_open and not args.headless:
             try:
@@ -553,7 +577,12 @@ def run_test():
                     wb.save(args.output)
                 except Exception:
                     pass
-        browser.close()
+        try:
+            browser.close()
+        except KeyboardInterrupt:
+            pass
+        except Exception:
+            pass
 
     try:
         wb.save(args.output)
